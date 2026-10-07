@@ -124,9 +124,11 @@ export function apply(ctx: ClientContext): void {
   ctx.slots.inject('conversation.input.right', () => ctx.slots.register({
     name: 'conversation.input.right',
     id: 'codex-speed',
-    order: 0,
+    order: 110,
     locale: NS,
     inject: (sessionId: string): SpeedSelectInjected => ({
+      sessionId,
+      selectionStore: (ctx.get('sessions') as unknown as { binding(id: string): { session: { projections: { faceOf(name: string): SpeedSelectInjected['selectionStore'] } } } }).binding(sessionId).session.projections.faceOf('modelSelection'),
       loadSpeed: createSpeedLoader(connection, models, sessionId),
       setSpeed: createSpeedSetter(connection, sessionId),
     }),

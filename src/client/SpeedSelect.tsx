@@ -2,7 +2,7 @@
  * Codex Speed toggle: one small control in the composer's right tool row
  * (`conversation.input.right`), switching the session between standard routing
  * and the fast (priority) service tier — the Codex desktop app's Speed menu.
- * The choice is per session and lives in the node half (in-memory); this
+ * The choice persists per session in the node half; this
  * component holds only viewing state. The control renders nothing until the
  * first load proves the session's current model is a codex model whose catalog
  * advertises the fast tier.
@@ -11,7 +11,7 @@
  * user-visible string goes through the locale `t` of the
  * 'settings.subscriptions' namespace, same as the settings section.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { CSSProperties } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
@@ -51,6 +51,8 @@ export interface ModelDirectoriesLike {
 
 /** Injected dependencies of {@link SpeedSelect} (slot `inject`, session-bound). */
 export interface SpeedSelectInjected {
+  sessionId?: string
+  selectionStore?: { subscribe(fn: () => void): () => void; getSnapshot(): { next?: { provider: string; model: string }; lastUsed?: { provider: string; model: string } } | undefined } | undefined
   /** Load the session's speed state; `visible` false keeps the control hidden. */
   loadSpeed: () => Promise<SpeedSelectState>
   /** Set the session's speed tier; resolves false when the write failed. */
@@ -89,7 +91,7 @@ export function createSpeedLoader(
     const directories = models()
     if (directories === undefined) return { visible: false, tier: state.tier }
     const { current } = await directories.directoryFor(sessionId).load()
-    const visible = current !== null && current.provider === 'codex'
+    const visible = current !== null && ['codex', 'openai-codex'].includes(current.provider)
       && state.fastModels.includes(current.model)
     return { visible, tier: state.tier }
   }
@@ -109,174 +111,61 @@ function fallbackTranslate(key: SubscriptionsKey): string {
   return en[key]
 }
 
-const TIERS: readonly SpeedTier[] = ['standard', 'fast']
+const emptySelection = { subscribe: (_fn: () => void) => () => {}, getSnapshot: () => undefined }
 
-/**
- * The composer Speed control: a trigger reading `速度 · 快速`/`速度 · 标准`
- * that opens a two-row menu (standard/fast with descriptions, check mark on
- * the current tier). Mount and every open reload the host state so a model
- * switch made since the last open self-corrects.
- */
-/** How often the control re-reads the host state (model switches arrive only by asking). */
-const POLL_INTERVAL_MS = 3000
-
-/**
- * The composer Speed control: a trigger reading `速度 · 快速`/`速度 · 标准`
- * that opens a two-row menu (standard/fast with descriptions, check mark on
- * the current tier). The host pushes nothing on a model switch, so the
- * control re-reads on a slow poll with a single-flight guard; a failed read
- * keeps the last known state, so a transient RPC failure can never lock the
- * toggle away (the earlier mount-only load had no recovery path).
- */
-export function SpeedSelect({ loadSpeed, setSpeed, t }: SpeedSelectProps) {
+/** Compact one-click Fast switch, scoped to the active native session. */
+export function SpeedSelect({ loadSpeed, setSpeed, t, sessionId, selectionStore }: SpeedSelectProps) {
   const translate = t ?? fallbackTranslate
   const [state, setState] = useState<SpeedSelectState | null>(null)
-  const [open, setOpen] = useState(false)
   const [busy, setBusy] = useState(false)
-  const rootRef = useRef<HTMLDivElement | null>(null)
-  // The inject face may be re-evaluated (new callback identities) on re-render;
-  // the poll effect mounts once and reads through this ref, so identity churn
-  // neither resets the interval nor multiplies in-flight loads.
+  const generation = useRef(0)
   const loadRef = useRef(loadSpeed)
   loadRef.current = loadSpeed
-
+  const store = selectionStore ?? emptySelection
+  const selection = useSyncExternalStore(fn => store.subscribe(fn), () => store.getSnapshot())
+  const selected = selection?.next ?? selection?.lastUsed
+  const routeKey = selected ? selected.provider + '/' + selected.model : ''
   useEffect(() => {
-    if (loadRef.current === undefined) return
-    let cancelled = false
+    const ticket = ++generation.current
+    setState(null)
+    setBusy(false)
     let inflight = false
     const reload = (): void => {
-      const load = loadRef.current
-      if (load === undefined || inflight) return
+      if (!loadRef.current || inflight) return
       inflight = true
-      void load().then(
-        (loaded) => { if (!cancelled) setState(loaded) },
-        () => { /* keep the last known state; the next tick retries */ },
-      ).finally(() => { inflight = false })
+      void loadRef.current().then(loaded => {
+        if (ticket === generation.current) setState(loaded)
+      }, () => {}).finally(() => { inflight = false })
     }
     reload()
-    const timer = setInterval(reload, POLL_INTERVAL_MS)
-    return () => {
-      cancelled = true
-      clearInterval(timer)
-    }
-  }, [])
-
-  useEffect(() => {
-    if (!open) return
-    const closeOutside = (event: MouseEvent): void => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', closeOutside)
-    return () => { document.removeEventListener('mousedown', closeOutside) }
-  }, [open])
-
-  if (loadSpeed === undefined || setSpeed === undefined || state === null || !state.visible) {
-    return null
-  }
-
-  const choose = (tier: SpeedTier): void => {
-    if (busy) return
-    if (tier === state.tier) {
-      setOpen(false)
-      return
-    }
-    setBusy(true)
-    void setSpeed(tier).then((ok) => {
-      setBusy(false)
-      if (ok) {
-        setState({ visible: true, tier })
-        setOpen(false)
-      }
-    })
-  }
-
-  const show = (): void => {
-    setOpen(true)
-    const load = loadRef.current
-    if (load === undefined) return
-    void load().then(setState, () => { /* keep showing the last good state */ })
-  }
-
-  const tierName = (tier: SpeedTier): string =>
-    translate(tier === 'fast' ? 'speedFast' : 'speedStandard')
-  const tierDescription = (tier: SpeedTier): string =>
-    translate(tier === 'fast' ? 'speedFastDescription' : 'speedStandardDescription')
-  const triggerLabel = `${translate('speed')} · ${tierName(state.tier)}`
-
-  return (
-    <div
-      ref={rootRef}
-      style={styles.root}
-      onKeyDown={(event) => {
-        if (event.key === 'Escape' && open) {
-          event.preventDefault()
-          setOpen(false)
-        }
-      }}
-    >
-      {open && (
-        <div style={styles.menu} role="menu" aria-label={translate('speed')}>
-          {TIERS.map(tier => (
-            <button
-              key={tier}
-              type="button"
-              role="menuitemradio"
-              aria-checked={tier === state.tier}
-              style={styles.item}
-              disabled={busy}
-              onClick={() => { choose(tier) }}
-            >
-              <span style={styles.itemCheck}>{tier === state.tier ? '✓' : ''}</span>
-              <span style={styles.itemText}>
-                <span style={styles.itemName}>{tierName(tier)}</span>
-                <span style={styles.itemDescription}>{tierDescription(tier)}</span>
-              </span>
-            </button>
-          ))}
-        </div>
-      )}
-      <button
-        type="button"
-        style={styles.trigger}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        title={triggerLabel}
-        disabled={busy}
-        onClick={() => {
-          if (open) setOpen(false)
-          else show()
-        }}
-      >
-        {triggerLabel}
-      </button>
-    </div>
-  )
+    const timer = setInterval(reload, 3000)
+    return () => { ++generation.current; clearInterval(timer) }
+  }, [sessionId, routeKey])
+  if (!setSpeed || !state?.visible || (selected && !['codex', 'openai-codex'].includes(selected.provider))) return null
+  const enabled = state.tier === 'fast'
+  const label = 'Fast · ' + translate(enabled ? 'speedFast' : 'speedStandard')
+  return <button type="button" aria-label="Fast 模式" aria-pressed={enabled}
+    title={label} disabled={busy}
+    style={{ ...styles.trigger, color: enabled ? 'var(--dsw-alias-brand-primary, #4d6fe9)' : 'var(--dsw-alias-label-secondary)' }}
+    onClick={() => {
+      if (busy) return
+      const ticket = generation.current
+      const tier = enabled ? 'standard' : 'fast'
+      setBusy(true)
+      void setSpeed(tier).then(ok => {
+        if (ticket !== generation.current) return
+        setBusy(false)
+        if (ok) setState({ visible: true, tier })
+      })
+    }}>
+    <svg width="18" height="18" viewBox="0 0 24 24" fill={enabled ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" aria-hidden="true"><path d="M13 2 4 14h7l-1 8 10-12h-7l1-8Z" /></svg>
+  </button>
 }
 
 const styles: Record<string, CSSProperties> = {
-  root: { position: 'relative', display: 'inline-flex' },
   trigger: {
-    border: '1px solid var(--dsw-alias-border-l2)', borderRadius: 8,
-    background: 'transparent', color: 'var(--dsw-alias-label-secondary)',
-    font: 'inherit', fontSize: 12, lineHeight: '18px',
-    padding: '2px 8px', cursor: 'pointer', whiteSpace: 'nowrap',
-  },
-  menu: {
-    position: 'absolute', bottom: '100%', right: 0, marginBottom: 4,
-    minWidth: 180, padding: 4, zIndex: 20,
-    background: 'var(--dsw-alias-bg-layer-1)', border: '1px solid var(--dsw-alias-border-l2)',
-    borderRadius: 8, display: 'flex', flexDirection: 'column', gap: 2,
-  },
-  item: {
-    display: 'flex', alignItems: 'flex-start', gap: 6, width: '100%',
     border: 'none', borderRadius: 6, background: 'transparent',
-    padding: '6px 8px', cursor: 'pointer', font: 'inherit', textAlign: 'left',
+    padding: 4, width: 28, height: 28, display: 'inline-flex',
+    alignItems: 'center', justifyContent: 'center', cursor: 'pointer',
   },
-  itemCheck: {
-    width: 14, flexShrink: 0, fontSize: 12, lineHeight: '18px',
-    color: 'var(--dsw-alias-label-primary)',
-  },
-  itemText: { display: 'flex', flexDirection: 'column' },
-  itemName: { fontSize: 12, lineHeight: '18px', color: 'var(--dsw-alias-label-primary)' },
-  itemDescription: { fontSize: 11, lineHeight: '16px', color: 'var(--dsw-alias-label-tertiary)' },
 }
