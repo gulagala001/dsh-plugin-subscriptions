@@ -28,6 +28,9 @@ concurrency:
 
 jobs:
   publish:
+    # This npm package and its Trusted Publisher belong to the upstream author.
+    # Fork adaptation tags must never enter the npm/OIDC publishing path.
+    if: github.repository == 'V1ki/dsh-plugin-subscriptions'
     name: Build, test, and publish to npm
     runs-on: ubuntu-latest
     timeout-minutes: 20
