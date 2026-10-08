@@ -752,7 +752,7 @@ export function apply(ctx: Context, config: Config): void {
   // expired access token renews instead of failing the lookup.
   const usageFetchers: UsageFetchers = {}
   // Durable per-session state, still gated by live model capabilities.
-  const speedBySession = new SessionSpeedStore()
+  const speedBySession = new SessionSpeedStore(undefined, onWarn)
   let codexAdapter: CodexAdapter | undefined
   // Dropped on every copilot auth transition so replay state (captured
   // reasoning) never survives an account switch in memory.

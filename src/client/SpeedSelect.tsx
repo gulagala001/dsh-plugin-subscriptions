@@ -15,7 +15,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import type { CSSProperties } from 'react'
 import type { PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
 import type { ConnectionHandle } from '@deepseek-ai/dsh-api-remotes/client'
-import { callSubscriptionsAuth } from './SubscriptionsSection.js'
+import { callSubscriptionsAuth } from './subscriptions-rpc.js'
 import { en } from './locales.js'
 import type { SubscriptionsKey } from './locales.js'
 
@@ -118,45 +118,65 @@ export function SpeedSelect({ loadSpeed, setSpeed, t, sessionId, selectionStore 
   const translate = t ?? fallbackTranslate
   const [state, setState] = useState<SpeedSelectState | null>(null)
   const [busy, setBusy] = useState(false)
+  const [saveFailed, setSaveFailed] = useState(false)
   const generation = useRef(0)
+  const revision = useRef(0)
+  const writing = useRef(false)
   const loadRef = useRef(loadSpeed)
   loadRef.current = loadSpeed
   const store = selectionStore ?? emptySelection
   const selection = useSyncExternalStore(fn => store.subscribe(fn), () => store.getSnapshot())
   const selected = selection?.next ?? selection?.lastUsed
-  const routeKey = selected ? selected.provider + '/' + selected.model : ''
+  const scope = JSON.stringify([sessionId, selected?.provider, selected?.model])
+  const [stateScope, setStateScope] = useState<string | null>(null)
   useEffect(() => {
     const ticket = ++generation.current
+    writing.current = false
     setState(null)
+    setStateScope(null)
     setBusy(false)
+    setSaveFailed(false)
     let inflight = false
     const reload = (): void => {
-      if (!loadRef.current || inflight) return
+      if (!loadRef.current || inflight || writing.current) return
+      const readRevision = revision.current
       inflight = true
-      void loadRef.current().then(loaded => {
-        if (ticket === generation.current) setState(loaded)
+      const load = loadRef.current
+      void Promise.resolve().then(load).then(loaded => {
+        if (ticket === generation.current && readRevision === revision.current && !writing.current) {
+          setState(loaded)
+          setStateScope(scope)
+        }
       }, () => {}).finally(() => { inflight = false })
     }
     reload()
     const timer = setInterval(reload, 3000)
     return () => { ++generation.current; clearInterval(timer) }
-  }, [sessionId, routeKey])
-  if (!setSpeed || !state?.visible || (selected && !['codex', 'openai-codex'].includes(selected.provider))) return null
+  }, [scope])
+  if (!setSpeed || stateScope !== scope || !state?.visible || (selected && !['codex', 'openai-codex'].includes(selected.provider))) return null
   const enabled = state.tier === 'fast'
   const label = 'Fast · ' + translate(enabled ? 'speedFast' : 'speedStandard')
   return <button type="button" aria-label="Fast 模式" aria-pressed={enabled}
-    title={label} disabled={busy}
+    title={saveFailed ? translate('speedSaveFailed') : label} disabled={busy}
     style={{ ...styles.trigger, color: enabled ? 'var(--dsw-alias-brand-primary, #4d6fe9)' : 'var(--dsw-alias-label-secondary)' }}
     onClick={() => {
-      if (busy) return
+      if (busy || writing.current) return
       const ticket = generation.current
       const tier = enabled ? 'standard' : 'fast'
+      // Invalidate every earlier read, including a poll still waiting when
+      // this write succeeds; pause new reads until the write settles.
+      ++revision.current
+      writing.current = true
       setBusy(true)
-      void setSpeed(tier).then(ok => {
+      setSaveFailed(false)
+      const finish = (ok: boolean): void => {
         if (ticket !== generation.current) return
+        writing.current = false
         setBusy(false)
-        if (ok) setState({ visible: true, tier })
-      })
+        if (ok) { setState({ visible: true, tier }); setStateScope(scope) }
+        else setSaveFailed(true)
+      }
+      void Promise.resolve().then(() => setSpeed(tier)).then(finish, () => finish(false))
     }}>
     <svg width="18" height="18" viewBox="0 0 24 24" fill={enabled ? 'currentColor' : 'none'} stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" aria-hidden="true"><path d="M13 2 4 14h7l-1 8 10-12h-7l1-8Z" /></svg>
   </button>
