@@ -23,6 +23,7 @@ import type {} from '@deepseek-ai/dsh-web'
 import type { AttachmentStore, ImageAttachmentRef } from '@deepseek-ai/dsh-attachment'
 import { OAuthFlowManager, type OAuthAttempt } from './auth/oauth-flow.js'
 import { DeviceFlowManager, type DeviceAttempt } from './auth/device-flow.js'
+import { SessionSpeedStore } from './session-speed.js'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { readClaudeCodeCredentials, refreshClaudeSynced } from './auth/claude-code-creds.js'
@@ -153,6 +154,8 @@ export { withTimeout } from './providers/common.js'
 export interface Config {
   /** Codex /models client_version override; does not change account entitlements. */
   codexClientVersion?: string
+  /** Keep old ChatGPT sessions usable without advertising a duplicate channel. */
+  legacyCodexRoute?: boolean
   /** Provider routes to register; defaults to every supported provider. */
   providers?: ProviderId[]
   /** Maximum provider idle time while one stream read is outstanding (default five minutes). */
@@ -212,6 +215,7 @@ const poolMemberSchema: z<PoolMemberRef> = z.object({
 export const Config: z<Config> = z.object({
   providers: z.array(providerIdSchema).default(['codex', 'claude', 'grok', 'copilot', 'antigravity']),
   codexClientVersion: z.string(),
+  legacyCodexRoute: z.boolean().default(false),
   streamIdleTimeoutMs: z.number().min(1).default(DEFAULT_STREAM_IDLE_TIMEOUT_MS),
   rateLimit: z.object({
     wait: z.boolean().default(true),
@@ -747,10 +751,8 @@ export function apply(ctx: Context, config: Config): void {
   // Usage lookups resolve the session through the refresh-aware path, so an
   // expired access token renews instead of failing the lookup.
   const usageFetchers: UsageFetchers = {}
-  // The composer Speed toggle's state: per-session, in-memory (a restart
-  // restores standard routing), gated per request on the model's discovered
-  // fast-tier support so a stale choice cannot leak onto a plain model.
-  const speedBySession = new Map<string, SpeedTier>()
+  // Durable per-session state, still gated by live model capabilities.
+  const speedBySession = new SessionSpeedStore(undefined, onWarn)
   let codexAdapter: CodexAdapter | undefined
   // Dropped on every copilot auth transition so replay state (captured
   // reasoning) never survives an account switch in memory.
@@ -762,6 +764,14 @@ export function apply(ctx: Context, config: Config): void {
       accounts: async () => (await accountTokens.get(provider)?.list() ?? []).map(({ key, session }) => ({ key, label: accountOf(provider, session) ?? key })),
     })
     memberAdapters.set(provider, route.poolMember())
+    if (provider === 'codex' && config.legacyCodexRoute) {
+      const legacy = new Proxy(route, { get(target, key) {
+        if (key === 'listModels') return async () => []
+        const value: unknown = Reflect.get(target, key)
+        return typeof value === 'function' ? value.bind(target) : value
+      } })
+      ctx.llm.registerAdapter(['openai-codex'], legacy)
+    }
     return ctx.llm.registerAdapter([provider], route)
   }
   for (const provider of providers) {
@@ -1067,8 +1077,7 @@ export function apply(ctx: Context, config: Config): void {
       }
     },
     async setSpeed(sessionId, tier) {
-      if (tier === 'standard') speedBySession.delete(sessionId)
-      else speedBySession.set(sessionId, tier)
+      await speedBySession.set(sessionId, tier)
     },
   }
   // Per-model default effort overrides (the Settings page's model pickers).

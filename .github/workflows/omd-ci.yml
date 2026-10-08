@@ -1,0 +1,47 @@
+name: OMD compatibility checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    if: github.repository == 'gulagala001/dsh-plugin-subscriptions'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Targeted offline regression checks
+        run: |
+          pnpm exec tsc -p tsconfig.test.json
+          node --test lib-test/test/session-speed.spec.js lib-test/test/session-speed-rpc.spec.js lib-test/test/client-command.spec.js
+      - name: Install isolated browser test runtime
+        run: |
+          npm install --prefix "$RUNNER_TEMP/subscriptions-browser" --no-package-lock --ignore-scripts playwright@1.62.1
+          node "$RUNNER_TEMP/subscriptions-browser/node_modules/playwright/cli.js" install --with-deps chromium
+          echo "PLAYWRIGHT_PATH=$RUNNER_TEMP/subscriptions-browser/node_modules/playwright" >> "$GITHUB_ENV"
+          executable="$(node -e "console.log(require(process.env.RUNNER_TEMP + '/subscriptions-browser/node_modules/playwright').chromium.executablePath())")"
+          echo "CFT_EXECUTABLE=$executable" >> "$GITHUB_ENV"
+      - name: Real React/Chromium Fast race and failure checks
+        run: node --test test/speed-select-browser.mjs
+      - name: Pack and verify distributable identity and contents
+        run: node scripts/pack-omd-release.mjs .release
+      - uses: actions/upload-artifact@v7
+        with:
+          name: omd-package
+          path: .release/*
+          if-no-files-found: error
+          include-hidden-files: true

@@ -28,6 +28,10 @@ Models that advertise reasoning levels get an **Effort** selector in the same me
 
 Codex models whose catalog advertises the fast tier (the codex CLI's fast mode) get a **Speed** toggle in the composer's tool row, next to the model selector — Standard or Fast (`service_tier: priority`), per session. The `/fast` slash command offers the same choice as a popup; it errors with an explanation when the current model has no fast tier.
 
+The Fast toggle ignores stale polling results after a save or session/model change. A failed save keeps the previous tier and shows a retry hint. If a saved session speed preference is malformed or unreadable, requests use Standard and the plugin logs a diagnostic without modifying the file. Saving is blocked until that file is repaired or removed; retrying then restores normal persistence.
+
+Peer declarations include DSH `0.2.0-rc.2` and `0.2.1-alpha.1`, plus the exact alpha dependencies Cordis `4.0.5-alpha.1` and Schemastery `3.18.5-alpha.1`, alongside the existing supported ranges. These declarations do not imply compatibility with later prereleases or verify native host execution.
+
 ![Speed toggle with the Standard/Fast menu open](https://raw.githubusercontent.com/V1ki/dsh-plugin-subscriptions/main/docs/images/speed-toggle.png)
 
 The composer's stats row gains a **subscription usage** pill showing the used percentage and reset window for the provider of the session's current model (Codex for a Codex model, Grok for a Grok model, and so on). It shows at most one provider: when switching to a non-subscription model, it keeps the most recent subscription selected in the mounted conversation view, or stays hidden if there is none. This recent-model history is not persisted across page reloads. Click the pill to expand every logged-in provider and account — the default account is starred, and the current provider is listed first. Antigravity previews only the current model's windows (at most two per account); the other model windows remain available in a closed disclosure.
