@@ -44,3 +44,4 @@ jobs:
           name: omd-package
           path: .release/*
           if-no-files-found: error
+          include-hidden-files: true
